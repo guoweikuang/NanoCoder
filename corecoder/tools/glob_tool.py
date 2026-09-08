@@ -1,6 +1,8 @@
 """File pattern matching."""
 
 from pathlib import Path
+from typing import ClassVar
+
 from .base import Tool
 
 
@@ -10,7 +12,7 @@ class GlobTool(Tool):
         "Find files matching a glob pattern. "
         "Supports ** for recursive matching (e.g. '**/*.py')."
     )
-    parameters = {
+    parameters: ClassVar[dict] = {
         "type": "object",
         "properties": {
             "pattern": {
@@ -28,6 +30,8 @@ class GlobTool(Tool):
     def execute(self, pattern: str, path: str = ".") -> str:
         try:
             base = Path(path).expanduser().resolve()
+            if not base.exists():
+                return f"Error: {path} not found"
             if not base.is_dir():
                 return f"Error: {path} is not a directory"
 
@@ -43,5 +47,6 @@ class GlobTool(Tool):
             if total > 100:
                 result += f"\n... ({total} matches, showing first 100)"
             return result or "No files matched."
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
+            # boundary: the agent gets an error string, not a traceback
             return f"Error: {e}"

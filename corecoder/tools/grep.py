@@ -2,6 +2,8 @@
 
 import re
 from pathlib import Path
+from typing import ClassVar
+
 from .base import Tool
 
 # skip these dirs to avoid noise
@@ -14,7 +16,7 @@ class GrepTool(Tool):
         "Search file contents with regex. "
         "Returns matching lines with file path and line number."
     )
-    parameters = {
+    parameters: ClassVar[dict] = {
         "type": "object",
         "properties": {
             "pattern": {
@@ -45,13 +47,15 @@ class GrepTool(Tool):
 
         if base.is_file():
             files = [base]
+            scan_truncated = False
         else:
-            files = self._walk(base, include)
+            files, scan_truncated = self._walk(base, include)
 
+        scan_limit_msg = "... (5000 file scan limit reached; results may be incomplete)"
         matches = []
         for fp in files:
             try:
-                text = fp.read_text(errors="ignore")
+                text = fp.read_text(encoding="utf-8", errors="ignore")
             except OSError:
                 continue
             for lineno, line in enumerate(text.splitlines(), 1):
@@ -59,20 +63,31 @@ class GrepTool(Tool):
                     matches.append(f"{fp}:{lineno}: {line.rstrip()}")
                     if len(matches) >= 200:
                         matches.append("... (200 match limit reached)")
+                        if scan_truncated:
+                            matches.append(scan_limit_msg)
                         return "\n".join(matches)
 
-        return "\n".join(matches) if matches else "No matches found."
+        if matches:
+            if scan_truncated:
+                matches.append(scan_limit_msg)
+            return "\n".join(matches)
+        if scan_truncated:
+            return f"No matches found in scanned files.\n{scan_limit_msg}"
+        return "No matches found."
 
     @staticmethod
-    def _walk(root: Path, include: str | None) -> list[Path]:
+    def _walk(root: Path, include: str | None) -> tuple[list[Path], bool]:
         """Walk dir tree, skipping junk dirs."""
         results = []
+        truncated = False
         for item in root.rglob(include or "*"):
-            # skip hidden/junk directories
-            if any(part in _SKIP_DIRS for part in item.parts):
+            # skip junk dirs *inside* the search root - matching item.parts would
+            # also catch an ancestor named e.g. "build" and hide the whole tree
+            if any(part in _SKIP_DIRS for part in item.relative_to(root).parts):
                 continue
             if item.is_file():
                 results.append(item)
             if len(results) >= 5000:
+                truncated = True
                 break
-        return results
+        return results, truncated

@@ -8,6 +8,8 @@ its own context window.
 The sub-agent runs to completion and returns a text summary.
 """
 
+from typing import ClassVar
+
 from .base import Tool
 
 
@@ -19,7 +21,7 @@ class AgentTool(Tool):
         "researching a codebase, implementing a multi-step change in isolation, "
         "or any task that would benefit from a fresh context window."
     )
-    parameters = {
+    parameters: ClassVar[dict] = {
         "type": "object",
         "properties": {
             "task": {
@@ -46,13 +48,17 @@ class AgentTool(Tool):
             tools=[t for t in parent.tools if t.name != "agent"],  # no recursive agents
             max_context_tokens=parent.context.max_tokens,
             max_rounds=20,
+            # the sub-agent answers to the same consent layer and hooks as the parent
+            permission=parent.permission,
+            hooks=parent.hooks,
         )
 
+        # a sub-agent failure comes back as text, never propagates into the parent
         try:
             result = sub.chat(task)
             # trim long results to avoid blowing up parent's context
             if len(result) > 5000:
                 result = result[:4500] + "\n... (sub-agent output truncated)"
             return f"[Sub-agent completed]\n{result}"
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             return f"Sub-agent error: {e}"

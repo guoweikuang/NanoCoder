@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "corecoder"
-version = "0.3.0"
-description = "Minimal AI coding agent (~1400 LoC) inspired by Claude Code. Works with any LLM. (formerly NanoCoder)"
+version = "0.6.0"
+description = "Minimal AI coding agent (~1,000 lines of Python) inspired by Claude Code. Works with any LLM. (formerly NanoCoder)"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
@@ -17,7 +17,6 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
@@ -40,7 +39,7 @@ packages = ["corecoder"]
 
 [project.optional-dependencies]
 litellm = ["litellm>=1.60.0,<2.0.0"]
-dev = ["pytest>=7.0"]
+dev = ["pytest>=7.0", "ruff>=0.9.0"]
 
 [project.scripts]
 corecoder = "corecoder.cli:main"
@@ -49,3 +48,7 @@ corecoder = "corecoder.cli:main"
 Homepage = "https://github.com/he-yufeng/CoreCoder"
 Repository = "https://github.com/he-yufeng/CoreCoder"
 Issues = "https://github.com/he-yufeng/CoreCoder/issues"
+
+[tool.ruff]
+line-length = 130
+target-version = "py310"

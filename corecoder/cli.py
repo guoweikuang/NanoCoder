@@ -1,21 +1,25 @@
 """Interactive REPL - the user-facing terminal interface."""
 
-import sys
-import os
 import argparse
+import os
+import sys
 
-from rich.console import Console
-from rich.markdown import Markdown
-from rich.panel import Panel
 from prompt_toolkit import prompt as pt_prompt
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
+from rich.console import Console
+from rich.markdown import Markdown
+from rich.panel import Panel
 
-from .agent import Agent
-from .llm import LLM, LiteLLM
-from .config import Config
-from .session import save_session, load_session, list_sessions
 from . import __version__
+from .agent import Agent
+from .config import Config
+from .hooks import load_hooks
+from .llm import LLM, LiteLLM
+from .mcp import load_mcp_tools
+from .permissions import Permission
+from .session import list_sessions, load_session, save_session
+from .tools import ALL_TOOLS
 
 console = Console()
 
@@ -25,10 +29,12 @@ def _parse_args():
         prog="corecoder",
         description="Minimal AI coding agent. Works with any OpenAI-compatible LLM.",
     )
-    p.add_argument("-m", "--model", help="Model name (default: $CORECODER_MODEL or gpt-4o)")
+    p.add_argument("-m", "--model", help="Model name (default: $CORECODER_MODEL or gpt-5.5)")
     p.add_argument("--base-url", help="API base URL (default: $OPENAI_BASE_URL)")
     p.add_argument("--api-key", help="API key (default: $OPENAI_API_KEY)")
     p.add_argument("-p", "--prompt", help="One-shot prompt (non-interactive mode)")
+    p.add_argument("--yes", action="store_true", help="Auto-approve every tool call (for scripts and CI)")
+    p.add_argument("--demo", action="store_true", help="Run the offline scripted demo (no API key needed)")
     p.add_argument("-r", "--resume", metavar="ID", help="Resume a saved session")
     p.add_argument("-v", "--version", action="version", version=f"%(prog)s {__version__}")
     return p.parse_args()
@@ -36,6 +42,11 @@ def _parse_args():
 
 def main():
     args = _parse_args()
+
+    if args.demo:
+        from .demo import run_demo
+        raise SystemExit(run_demo())
+
     config = Config.from_env()
 
     # CLI args override env vars
@@ -70,7 +81,20 @@ def main():
         temperature=config.temperature,
         max_tokens=config.max_tokens,
     )
-    agent = Agent(llm=llm, max_context_tokens=config.max_context_tokens)
+    # consent layer: ask in the REPL, refuse in one-shot mode, --yes skips it
+    if args.yes:
+        permission = Permission(allow_all=True)
+    elif args.prompt:
+        permission = Permission()
+    else:
+        permission = Permission(ask=_ask_permission)
+    agent = Agent(
+        llm=llm,
+        tools=[*ALL_TOOLS, *load_mcp_tools()],
+        max_context_tokens=config.max_context_tokens,
+        permission=permission,
+        hooks=load_hooks(),
+    )
 
     # resume saved session
     if args.resume:
@@ -95,24 +119,58 @@ def main():
     _repl(agent, config)
 
 
+def _ask_permission(tool_name: str, arguments: dict) -> str:
+    """REPL consent prompt. Anything but a clear yes counts as a no."""
+    console.print(f"\n[bold yellow]permission requested:[/] [cyan]{tool_name}[/cyan]({_brief(arguments)})")
+    try:
+        answer = pt_prompt("  [y] allow once  [a] always allow this tool  [n] deny: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        console.print("[dim]denied[/dim]")
+        return "deny"
+    if answer in ("y", "yes"):
+        return "once"
+    if answer in ("a", "always"):
+        return "always"
+    return "deny"
+
+
 def _run_once(agent: Agent, prompt: str):
     """Non-interactive: run one prompt and exit."""
+    perm = agent.permission
+    if perm is not None and perm.ask is None and not perm.allow_all:
+        console.print("[dim]one-shot mode: mutating tools are refused unless you pass --yes[/dim]")
+
     def on_token(tok):
         print(tok, end="", flush=True)
 
     def on_tool(name, kwargs):
         console.print(f"\n[dim]> {name}({_brief(kwargs)})[/dim]")
 
-    agent.chat(prompt, on_token=on_token, on_tool=on_tool)
+    try:
+        agent.chat(prompt, on_token=on_token, on_tool=on_tool)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Interrupted.[/yellow]")
+        sys.exit(130)
+    except Exception as e:  # noqa: BLE001
+        # one-shot mode: print whatever went wrong and exit non-zero
+        console.print(f"\n[red]Error: {e}[/red]")
+        sys.exit(1)
     print()
 
 
 def _repl(agent: Agent, config: Config):
     """Interactive read-eval-print loop."""
+    perm = agent.permission
+    mode = "auto-approve every tool call (--yes)" if (perm and perm.allow_all) else "ask before mutating tools"
+    mcp_count = sum(1 for t in agent.tools if t.name.startswith("mcp__"))
     console.print(Panel(
         f"[bold]CoreCoder[/bold] v{__version__}\n"
         f"Model: [cyan]{config.model}[/cyan]"
         + (f"  Base: [dim]{config.base_url}[/dim]" if config.base_url else "")
+        + f"\nPermissions: [cyan]{mode}[/cyan]"
+        + (f"\nHooks: [cyan]{len(agent.hooks.pre)} pre, {len(agent.hooks.post)} post[/cyan]"
+           " from ~/.corecoder/hooks.json" if agent.hooks else "")
+        + (f"\nMCP: [cyan]{mcp_count} tools[/cyan] from ~/.corecoder/mcp.json" if mcp_count else "")
         + "\nType [bold]/help[/bold] for commands, [bold]Ctrl+C[/bold] to cancel, [bold]quit[/bold] to exit.",
         border_style="blue",
     ))
@@ -134,7 +192,7 @@ def _repl(agent: Agent, config: Config):
     while True:
         try:
             user_input = pt_prompt(
-                "You > ",
+                "You (plan) > " if agent.plan_mode else "You > ",
                 history=history,
                 multiline=True,
                 key_bindings=kb,
@@ -157,6 +215,21 @@ def _repl(agent: Agent, config: Config):
             agent.reset()
             console.print("[yellow]Conversation reset.[/yellow]")
             continue
+        if user_input == "/plan":
+            agent.plan_mode = not agent.plan_mode
+            if agent.plan_mode:
+                console.print(
+                    "[yellow]Plan mode on.[/yellow] The agent can look but not touch: it will "
+                    "investigate read-only and present a plan. Type [bold]approve[/bold] to "
+                    "accept the plan, or [bold]/plan[/bold] again to exit."
+                )
+            else:
+                console.print("[yellow]Plan mode off.[/yellow]")
+            continue
+        if agent.plan_mode and user_input.lower() in ("approve", "/approve"):
+            agent.plan_mode = False
+            console.print("[yellow]Plan mode off.[/yellow]")
+            user_input = "approve"  # the approval itself goes to the model, which then executes
         if user_input == "/tokens":
             p = agent.llm.total_prompt_tokens
             c = agent.llm.total_completion_tokens
@@ -199,6 +272,13 @@ def _repl(agent: Agent, config: Config):
                 for f in sorted(_changed_files):
                     console.print(f"  [cyan]{f}[/cyan]")
             continue
+        if user_input == "/undo":
+            from .checkpoints import pending, undo
+            console.print(undo())
+            left = pending()
+            if left:
+                console.print(f"[dim]{left} more checkpoint(s) on the stack.[/dim]")
+            continue
         if user_input == "/sessions":
             sessions = list_sessions()
             if not sessions:
@@ -208,10 +288,15 @@ def _repl(agent: Agent, config: Config):
                     console.print(f"  [cyan]{s['id']}[/cyan] ({s['model']}, {s['saved_at']}) {s['preview']}")
             continue
 
+        # an unknown /command shouldn't be sent to the model as a prompt
+        if user_input.startswith("/"):
+            console.print(f"[yellow]Unknown command: {user_input.split()[0]} (try /help)[/yellow]")
+            continue
+
         # call the agent
         streamed: list[str] = []
 
-        def on_token(tok):
+        def on_token(tok, streamed=streamed):
             streamed.append(tok)
             print(tok, end="", flush=True)
 
@@ -227,7 +312,8 @@ def _repl(agent: Agent, config: Config):
                 console.print(Markdown(response))
         except KeyboardInterrupt:
             console.print("\n[yellow]Interrupted.[/yellow]")
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
+            # keep the REPL alive no matter what chat() throws
             console.print(f"\n[red]Error: {e}[/red]")
 
 
@@ -241,6 +327,8 @@ def _show_help():
         "  /tokens        Show token usage\n"
         "  /compact       Compress conversation context\n"
         "  /diff          Show files modified this session\n"
+        "  /undo          Revert the most recent file change\n"
+        "  /plan          Toggle plan mode: read-only, then a plan to approve\n"
         "  /save          Save session to disk\n"
         "  /sessions      List saved sessions\n"
         "  quit           Exit CoreCoder\n"

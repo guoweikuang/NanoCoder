@@ -8,7 +8,9 @@ and makes edits safe and reviewable.
 
 import difflib
 from pathlib import Path
+from typing import ClassVar
 
+from ..checkpoints import record as _record_checkpoint
 from .base import Tool
 
 # track files changed this session for /diff
@@ -22,7 +24,7 @@ class EditFileTool(Tool):
         "old_string must appear exactly once in the file for safety. "
         "Include enough surrounding context to ensure uniqueness."
     )
-    parameters = {
+    parameters: ClassVar[dict] = {
         "type": "object",
         "properties": {
             "file_path": {
@@ -47,7 +49,10 @@ class EditFileTool(Tool):
             if not p.exists():
                 return f"Error: {file_path} not found"
 
-            content = p.read_text()
+            try:
+                content = p.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                return f"Error: {file_path} is not a UTF-8 text file (edit_file only edits text files)"
             occurrences = content.count(old_string)
 
             if occurrences == 0:
@@ -63,13 +68,15 @@ class EditFileTool(Tool):
                 )
 
             new_content = content.replace(old_string, new_string, 1)
-            p.write_text(new_content)
+            _record_checkpoint(p)
+            p.write_text(new_content, encoding="utf-8")
             _changed_files.add(str(p))
 
             # generate a unified diff so the user/LLM can see exactly what changed
             diff = _unified_diff(content, new_content, str(p))
             return f"Edited {file_path}\n{diff}"
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
+            # boundary: the agent gets an error string, not a traceback
             return f"Error: {e}"
 
 
